@@ -1,0 +1,103 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  dependency-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer:v2
+          coverage: none
+
+      - name: Install Composer dependencies safely
+        run: composer install --no-interaction --no-progress --prefer-dist --no-scripts --ignore-platform-reqs
+
+      - name: Composer security audit
+        run: |
+          mkdir -p reports
+          set +e
+          composer audit --format=json > reports/composer-audit.json
+          code=$?
+          composer audit || true
+          exit $code
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: NPM security audit
+        run: |
+          mkdir -p reports
+          if [ -f package.json ]; then
+            npm install --package-lock-only --ignore-scripts
+            set +e
+            npm audit --json > reports/npm-audit.json
+            code=$?
+            npm audit || true
+            exit $code
+          else
+            echo '{"message":"package.json not found"}' > reports/npm-audit.json
+          fi
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-reports
+          path: reports/
+
+  static-analysis:
+    name: Static security analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Semgrep
+        run: python -m pip install --upgrade semgrep
+
+      - name: Run Semgrep Laravel/PHP/security rules
+        run: |
+          mkdir -p reports
+          semgrep scan \
+            --config p/php \
+            --config p/laravel \
+            --config p/security-audit \
+            --sarif --output reports/semgrep.sarif
+
+      - name: Upload Semgrep SARIF to GitHub code scanning
+        if: always() && hashFiles('reports/semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/semgrep.sarif
+
+      - name: Upload static-analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-reports
+          path: reports/
